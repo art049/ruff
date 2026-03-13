@@ -211,6 +211,13 @@ impl LineWidthBuilder {
                     self.width = 0;
                     self.column = 0;
                 }
+                _ if c.is_ascii() => {
+                    // ASCII printable characters (space through tilde) have width 1.
+                    // ASCII control characters have width 0.
+                    let w = usize::from(c >= ' ' && c != '\x7f');
+                    self.width += w;
+                    self.column += 1;
+                }
                 _ => {
                     self.width += c.width().unwrap_or(0);
                     self.column += 1;

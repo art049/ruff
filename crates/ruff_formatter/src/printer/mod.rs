@@ -440,24 +440,44 @@ impl<'a> Printer<'a> {
 
     fn print_text(&mut self, text: Text) {
         if !self.state.pending_indent.is_empty() {
-            let (indent_char, repeat_count) = match self.options.indent_style() {
-                IndentStyle::Tab => ('\t', 1),
-                IndentStyle::Space => (' ', self.options.indent_width()),
-            };
-
             let indent = std::mem::take(&mut self.state.pending_indent);
-            let total_indent_char_count = indent.level() as usize * repeat_count as usize;
 
-            self.state
-                .buffer
-                .reserve(total_indent_char_count + indent.align() as usize);
+            match self.options.indent_style() {
+                #[expect(clippy::cast_possible_truncation)]
+                IndentStyle::Tab => {
+                    let tab_count = indent.level() as usize;
+                    let align_count = indent.align() as usize;
+                    let total = tab_count + align_count;
 
-            for _ in 0..total_indent_char_count {
-                self.print_char(indent_char);
-            }
+                    self.state.buffer.reserve(total);
 
-            for _ in 0..indent.align() {
-                self.print_char(' ');
+                    // Write tabs for indentation
+                    for _ in 0..tab_count {
+                        self.state.buffer.push('\t');
+                    }
+                    self.state.line_width +=
+                        tab_count as u32 * self.options.indent_width.value();
+
+                    // Write spaces for alignment
+                    for _ in 0..align_count {
+                        self.state.buffer.push(' ');
+                    }
+                    self.state.line_width += align_count as u32;
+                }
+                #[expect(clippy::cast_possible_truncation)]
+                IndentStyle::Space => {
+                    let space_count =
+                        indent.level() as usize * self.options.indent_width() as usize
+                            + indent.align() as usize;
+
+                    self.state.buffer.reserve(space_count);
+
+                    // Write all spaces at once using extend
+                    for _ in 0..space_count {
+                        self.state.buffer.push(' ');
+                    }
+                    self.state.line_width += space_count as u32;
+                }
             }
         }
 
@@ -834,6 +854,10 @@ impl<'a> Printer<'a> {
             #[expect(clippy::cast_possible_truncation)]
             let char_width = if char == '\t' {
                 self.options.indent_width.value()
+            } else if char.is_ascii() {
+                // ASCII printable characters (space through tilde) have width 1.
+                // ASCII control characters have width 0.
+                u32::from(char >= ' ' && char != '\x7f')
             } else {
                 // SAFETY: A u32 is sufficient to represent the width of a file <= 4GB
                 char.width().unwrap_or(0) as u32
@@ -1510,9 +1534,17 @@ impl<'a, 'print> FitsMeasurer<'a, 'print> {
                                     }
                                 }
                             }
-                            // SAFETY: A u32 is sufficient to format files <= 4GB
                             #[expect(clippy::cast_possible_truncation)]
-                            c => c.width().unwrap_or(0) as u32,
+                            c => {
+                                if c.is_ascii() {
+                                    // ASCII printable characters (space through tilde) have width 1.
+                                    // ASCII control characters have width 0.
+                                    u32::from(c >= ' ' && c != '\x7f')
+                                } else {
+                                    // SAFETY: A u32 is sufficient to format files <= 4GB
+                                    c.width().unwrap_or(0) as u32
+                                }
+                            }
                         };
                         self.state.line_width += char_width;
                     }
