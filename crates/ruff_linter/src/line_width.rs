@@ -229,8 +229,63 @@ impl LineWidthBuilder {
 
     /// Adds the given text to the line width.
     #[must_use]
-    pub fn add_str(self, text: &str) -> Self {
-        self.update(text.chars())
+    pub fn add_str(mut self, text: &str) -> Self {
+        let tab_size: usize = self.tab_size.as_usize();
+        let bytes = text.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            // Fast path: scan for a run of printable ASCII (space through tilde).
+            // These all have width 1, so we can count them in bulk.
+            let start = i;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if !(b' '..=b'~').contains(&b) {
+                    break;
+                }
+                i += 1;
+            }
+
+            let ascii_run = i - start;
+            if ascii_run > 0 {
+                self.width += ascii_run;
+                self.column += ascii_run;
+            }
+
+            if i >= bytes.len() {
+                break;
+            }
+
+            let b = bytes[i];
+            if b < 0x80 {
+                // ASCII special character (control char, tab, newline, DEL)
+                match b {
+                    b'\t' => {
+                        let tab_offset = tab_size - (self.column % tab_size);
+                        self.width += tab_offset;
+                        self.column += tab_offset;
+                    }
+                    b'\n' | b'\r' => {
+                        self.width = 0;
+                        self.column = 0;
+                    }
+                    _ => {
+                        // Other ASCII control characters have width 0
+                        self.column += 1;
+                    }
+                }
+                i += 1;
+            } else {
+                // Non-ASCII: decode the char and look up its Unicode width.
+                // SAFETY: `bytes[i]` is >= 0x80, so this is a multi-byte UTF-8 sequence.
+                let c = text[i..].chars().next().unwrap();
+                self.width += c.width().unwrap_or(0);
+                self.column += 1;
+                i += c.len_utf8();
+            }
+        }
+
+        self
     }
 
     /// Adds the given character to the line width.

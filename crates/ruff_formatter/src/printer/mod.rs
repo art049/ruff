@@ -451,17 +451,17 @@ impl<'a> Printer<'a> {
 
                     self.state.buffer.reserve(total);
 
-                    // Write tabs for indentation
-                    for _ in 0..tab_count {
-                        self.state.buffer.push('\t');
-                    }
+                    // Write tabs for indentation in bulk
+                    self.state
+                        .buffer
+                        .extend(std::iter::repeat_n('\t', tab_count));
                     self.state.line_width +=
                         tab_count as u32 * self.options.indent_width.value();
 
-                    // Write spaces for alignment
-                    for _ in 0..align_count {
-                        self.state.buffer.push(' ');
-                    }
+                    // Write spaces for alignment in bulk
+                    self.state
+                        .buffer
+                        .extend(std::iter::repeat_n(' ', align_count));
                     self.state.line_width += align_count as u32;
                 }
                 #[expect(clippy::cast_possible_truncation)]
@@ -472,10 +472,10 @@ impl<'a> Printer<'a> {
 
                     self.state.buffer.reserve(space_count);
 
-                    // Write all spaces at once using extend
-                    for _ in 0..space_count {
-                        self.state.buffer.push(' ');
-                    }
+                    // Write all spaces in bulk
+                    self.state
+                        .buffer
+                        .extend(std::iter::repeat_n(' ', space_count));
                     self.state.line_width += space_count as u32;
                 }
             }
@@ -497,8 +497,38 @@ impl<'a> Printer<'a> {
                     self.state.buffer.push_str(text);
                     self.state.line_width += width.value();
                 } else {
-                    for char in text.chars() {
-                        self.print_char(char);
+                    // Process text with batch ASCII optimization.
+                    // Most Python source text is ASCII, so we can push runs of
+                    // printable ASCII directly and only fall back to per-char
+                    // processing for special characters (newlines, tabs, non-ASCII).
+                    let bytes = text.as_bytes();
+                    let mut i = 0;
+                    #[expect(clippy::cast_possible_truncation)]
+                    while i < bytes.len() {
+                        // Scan for a run of printable ASCII (space through tilde)
+                        let start = i;
+                        while i < bytes.len() {
+                            let b = bytes[i];
+                            if !(b' '..=b'~').contains(&b) {
+                                break;
+                            }
+                            i += 1;
+                        }
+
+                        if i > start {
+                            // Push the entire ASCII run at once
+                            self.state.buffer.push_str(&text[start..i]);
+                            self.state.line_width += (i - start) as u32;
+                        }
+
+                        if i >= bytes.len() {
+                            break;
+                        }
+
+                        // Handle special character
+                        let c = text[i..].chars().next().unwrap();
+                        self.print_char(c);
+                        i += c.len_utf8();
                     }
                 }
             }
@@ -1499,9 +1529,11 @@ impl<'a, 'print> FitsMeasurer<'a, 'print> {
                 && !args.measure_mode().allows_text_overflow()
         }
 
-        let indent = std::mem::take(&mut self.state.pending_indent);
-        self.state.line_width +=
-            u32::from(indent.level()) * self.options().indent_width() + u32::from(indent.align());
+        if !self.state.pending_indent.is_empty() {
+            let indent = std::mem::take(&mut self.state.pending_indent);
+            self.state.line_width += u32::from(indent.level()) * self.options().indent_width()
+                + u32::from(indent.align());
+        }
 
         match text {
             #[expect(clippy::cast_possible_truncation)]
@@ -1512,41 +1544,66 @@ impl<'a, 'print> FitsMeasurer<'a, 'print> {
                 if let Some(width) = text_width.width() {
                     self.state.line_width += width.value();
                 } else {
-                    for c in text.chars() {
-                        let char_width = match c {
-                            '\t' => self.options().indent_width.value(),
-                            '\n' => {
-                                if self.must_be_flat {
-                                    return Fits::No;
+                    // Batch-process ASCII runs for width measurement.
+                    let bytes = text.as_bytes();
+                    let mut i = 0;
+                    #[expect(clippy::cast_possible_truncation)]
+                    while i < bytes.len() {
+                        // Scan for a run of printable ASCII (space through tilde)
+                        let start = i;
+                        while i < bytes.len() {
+                            let b = bytes[i];
+                            if !(b' '..=b'~').contains(&b) {
+                                break;
+                            }
+                            i += 1;
+                        }
+
+                        if i > start {
+                            self.state.line_width += (i - start) as u32;
+                        }
+
+                        if i >= bytes.len() {
+                            break;
+                        }
+
+                        // Handle special character
+                        let b = bytes[i];
+                        if b == b'\t' {
+                            self.state.line_width += self.options().indent_width.value();
+                            i += 1;
+                        } else if b == b'\n' {
+                            if self.must_be_flat {
+                                return Fits::No;
+                            }
+                            match args.measure_mode() {
+                                MeasureMode::FirstLine => {
+                                    return if exceeds_width(self, args) {
+                                        Fits::No
+                                    } else {
+                                        Fits::Yes
+                                    };
                                 }
-                                match args.measure_mode() {
-                                    MeasureMode::FirstLine => {
-                                        return if exceeds_width(self, args) {
-                                            Fits::No
-                                        } else {
-                                            Fits::Yes
-                                        };
-                                    }
-                                    MeasureMode::AllLines
-                                    | MeasureMode::AllLinesAllowTextOverflow => {
-                                        self.state.line_width = 0;
-                                        continue;
-                                    }
+                                MeasureMode::AllLines
+                                | MeasureMode::AllLinesAllowTextOverflow => {
+                                    self.state.line_width = 0;
                                 }
                             }
+                            i += 1;
+                        } else if b < 0x80 {
+                            // Other ASCII control characters have width 0
+                            i += 1;
+                        } else {
+                            // Non-ASCII: decode char and look up width
                             #[expect(clippy::cast_possible_truncation)]
-                            c => {
-                                if c.is_ascii() {
-                                    // ASCII printable characters (space through tilde) have width 1.
-                                    // ASCII control characters have width 0.
-                                    u32::from(c >= ' ' && c != '\x7f')
-                                } else {
-                                    // SAFETY: A u32 is sufficient to format files <= 4GB
-                                    c.width().unwrap_or(0) as u32
-                                }
-                            }
-                        };
-                        self.state.line_width += char_width;
+                            let char_width = {
+                                let c = text[i..].chars().next().unwrap();
+                                let w = c.width().unwrap_or(0) as u32;
+                                i += c.len_utf8();
+                                w
+                            };
+                            self.state.line_width += char_width;
+                        }
                     }
                 }
             }

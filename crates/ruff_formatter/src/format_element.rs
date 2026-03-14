@@ -519,6 +519,7 @@ impl TextWidth {
             let char_width = match c {
                 '\t' => indent_width.value(),
                 '\n' => return TextWidth::Multiline,
+                c if c.is_ascii() => u32::from(c >= ' ' && c != '\x7f'),
                 #[expect(clippy::cast_possible_truncation)]
                 c => c.width().unwrap_or(0) as u32,
             };
