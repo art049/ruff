@@ -1021,93 +1021,102 @@ impl<'a> SemanticModel<'a> {
             .or_else(|| self.lookup_symbol(&head.id))
             .map(|id| self.binding(id))?;
 
+        // Fast path: when the expression is a simple name (no attribute access),
+        // we know the unqualified name has a single segment and the tail is empty.
+        // This avoids the cost of UnqualifiedName::from_expr entirely.
+        let is_simple_name = value.is_name_expr();
+
         match &binding.kind {
             BindingKind::Import(Import { qualified_name }) => {
-                let unqualified_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = unqualified_name.segments().split_first()?;
-                let resolved: QualifiedName = qualified_name
-                    .segments()
-                    .iter()
-                    .chain(tail)
-                    .copied()
-                    .collect();
-                Some(resolved)
+                if is_simple_name {
+                    Some(qualified_name.as_ref().clone())
+                } else {
+                    let unqualified_name = UnqualifiedName::from_expr(value)?;
+                    let (_, tail) = unqualified_name.segments().split_first()?;
+                    Some(QualifiedName::from_two_parts(
+                        qualified_name.segments(),
+                        tail,
+                    ))
+                }
             }
             BindingKind::SubmoduleImport(SubmoduleImport { qualified_name }) => {
-                let value_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = value_name.segments().split_first()?;
-
-                Some(
-                    qualified_name
-                        .segments()
-                        .iter()
-                        .take(1)
-                        .chain(tail)
-                        .copied()
-                        .collect(),
-                )
+                let head_segment = &qualified_name.segments()[..1];
+                if is_simple_name {
+                    Some(QualifiedName::from_two_parts(head_segment, &[]))
+                } else {
+                    let value_name = UnqualifiedName::from_expr(value)?;
+                    let (_, tail) = value_name.segments().split_first()?;
+                    Some(QualifiedName::from_two_parts(head_segment, tail))
+                }
             }
             BindingKind::FromImport(FromImport { qualified_name }) => {
-                let value_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = value_name.segments().split_first()?;
-
-                let resolved: QualifiedName =
+                if is_simple_name {
                     if qualified_name.segments().first().copied() == Some(".") {
                         from_relative_import(
                             self.module.qualified_name()?,
                             qualified_name.segments(),
-                            tail,
-                        )?
+                            &[],
+                        )
                     } else {
-                        qualified_name
-                            .segments()
-                            .iter()
-                            .chain(tail)
-                            .copied()
-                            .collect()
-                    };
-                Some(resolved)
+                        Some(qualified_name.as_ref().clone())
+                    }
+                } else {
+                    let value_name = UnqualifiedName::from_expr(value)?;
+                    let (_, tail) = value_name.segments().split_first()?;
+                    let resolved: QualifiedName =
+                        if qualified_name.segments().first().copied() == Some(".") {
+                            from_relative_import(
+                                self.module.qualified_name()?,
+                                qualified_name.segments(),
+                                tail,
+                            )?
+                        } else {
+                            QualifiedName::from_two_parts(qualified_name.segments(), tail)
+                        };
+                    Some(resolved)
+                }
             }
             BindingKind::Builtin => {
-                if value.is_name_expr() {
+                if is_simple_name {
                     // Ex) `dict`
                     Some(QualifiedName::builtin(head.id.as_str()))
                 } else {
                     // Ex) `dict.__dict__`
                     let value_name = UnqualifiedName::from_expr(value)?;
-                    Some(
-                        std::iter::once("")
-                            .chain(value_name.segments().iter().copied())
-                            .collect(),
-                    )
+                    Some(QualifiedName::from_two_parts(
+                        &[""],
+                        value_name.segments(),
+                    ))
                 }
             }
             BindingKind::ClassDefinition(_) | BindingKind::FunctionDefinition(_) => {
-                // If we have a fully-qualified path for the module, use it.
-                if let Some(path) = self.module.qualified_name() {
-                    Some(
-                        path.iter()
-                            .map(String::as_str)
-                            .chain(
-                                UnqualifiedName::from_expr(value)?
-                                    .segments()
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                    )
+                if is_simple_name {
+                    if let Some(path) = self.module.qualified_name() {
+                        let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
+                        Some(QualifiedName::from_two_parts(
+                            &path_strs,
+                            &[head.id.as_str()],
+                        ))
+                    } else {
+                        Some(QualifiedName::from_two_parts(
+                            &[self.module.name()?],
+                            &[head.id.as_str()],
+                        ))
+                    }
                 } else {
-                    // Otherwise, if we're in (e.g.) a script, use the module name.
-                    Some(
-                        std::iter::once(self.module.name()?)
-                            .chain(
-                                UnqualifiedName::from_expr(value)?
-                                    .segments()
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                    )
+                    let value_name = UnqualifiedName::from_expr(value)?;
+                    if let Some(path) = self.module.qualified_name() {
+                        let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
+                        Some(QualifiedName::from_two_parts(
+                            &path_strs,
+                            value_name.segments(),
+                        ))
+                    } else {
+                        Some(QualifiedName::from_two_parts(
+                            &[self.module.name()?],
+                            value_name.segments(),
+                        ))
+                    }
                 }
             }
             _ => None,

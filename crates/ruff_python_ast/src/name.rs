@@ -237,6 +237,19 @@ impl<'a> QualifiedName<'a> {
         name.split('.').collect()
     }
 
+    /// Construct a [`QualifiedName`] by concatenating two segment slices.
+    ///
+    /// This is more efficient than chaining iterators and collecting, as it
+    /// avoids the per-element dispatch overhead of iterator adapters.
+    #[inline]
+    pub fn from_two_parts(head: &[&'a str], tail: &[&'a str]) -> Self {
+        let total = head.len() + tail.len();
+        let mut segments = SegmentsVec::with_capacity(total);
+        segments.extend_from_slice(head);
+        segments.extend_from_slice(tail);
+        Self(segments)
+    }
+
     /// Creates a qualified name for a built in
     #[inline]
     pub fn builtin(name: &'a str) -> Self {
