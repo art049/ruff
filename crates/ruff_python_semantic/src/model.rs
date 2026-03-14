@@ -1093,10 +1093,7 @@ impl<'a> SemanticModel<'a> {
                                 tail_segments,
                             )?
                         } else {
-                            QualifiedName::from_two_parts(
-                                qualified_name.segments(),
-                                tail_segments,
-                            )
+                            QualifiedName::from_two_parts(qualified_name.segments(), tail_segments)
                         };
                     Some(resolved)
                 }
@@ -1127,10 +1124,7 @@ impl<'a> SemanticModel<'a> {
                         // Build path_strs with head appended, then concat with tail.
                         let mut head_segments = path_strs;
                         head_segments.push(head.id.as_str());
-                        Some(QualifiedName::from_two_parts(
-                            &head_segments,
-                            tail_segments,
-                        ))
+                        Some(QualifiedName::from_two_parts(&head_segments, tail_segments))
                     }
                 } else {
                     if is_simple_name {
