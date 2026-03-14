@@ -30,6 +30,14 @@ impl Overlong {
             return None;
         }
 
+        // For any Unicode character, display width ≤ UTF-8 byte length. The only exception
+        // is the tab character (1 byte, up to tab_size columns). So if a line has no tabs
+        // and its byte length is within the limit, it cannot be overlong.
+        let limit_usize = limit.value() as usize;
+        if line.len() <= limit_usize && memchr::memchr(b'\t', line.as_bytes()).is_none() {
+            return None;
+        }
+
         // Measure the line. If it's already below the limit, exit early.
         let width = measure(line.as_str(), tab_size);
         if width <= limit {

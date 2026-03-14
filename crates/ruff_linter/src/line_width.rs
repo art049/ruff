@@ -226,6 +226,13 @@ impl LineWidthBuilder {
         // Fast path: ASCII text without tabs or newlines has width == byte length.
         // `is_ascii()` is SIMD-accelerated, avoiding per-char `unicode_width` lookups.
         if text.is_ascii() {
+            // Super-fast path: ASCII text with no special characters.
+            // Width and column just increase by the byte length.
+            if memchr::memchr3(b'\t', b'\n', b'\r', text.as_bytes()).is_none() {
+                self.width += text.len();
+                self.column += text.len();
+                return self;
+            }
             let tab_size: usize = self.tab_size.as_usize();
             for &b in text.as_bytes() {
                 match b {
