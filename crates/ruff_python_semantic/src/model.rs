@@ -1014,6 +1014,16 @@ impl<'a> SemanticModel<'a> {
             }
         }
 
+        // The tail segments (everything after the head Name) extracted from the
+        // expression. For simple names, the tail is empty. For single/double
+        // attribute access, we extract directly, avoiding UnqualifiedName::from_expr.
+        enum Tail<'a> {
+            Empty,
+            One([&'a str; 1]),
+            Two([&'a str; 2]),
+            Full(UnqualifiedName<'a>),
+        }
+
         // If the name was already resolved, look it up; otherwise, search for the symbol.
         let head = match_head(value)?;
         let binding = self
@@ -1021,33 +1031,47 @@ impl<'a> SemanticModel<'a> {
             .or_else(|| self.lookup_symbol(&head.id))
             .map(|id| self.binding(id))?;
 
-        // Fast path: when the expression is a simple name (no attribute access),
-        // we know the unqualified name has a single segment and the tail is empty.
-        // This avoids the cost of UnqualifiedName::from_expr entirely.
-        let is_simple_name = value.is_name_expr();
+        let tail = match value {
+            Expr::Name(_) => Tail::Empty,
+            Expr::Attribute(attr) => match attr.value.as_ref() {
+                Expr::Name(_) => Tail::One([attr.attr.as_str()]),
+                Expr::Attribute(attr2) if attr2.value.is_name_expr() => {
+                    Tail::Two([attr2.attr.as_str(), attr.attr.as_str()])
+                }
+                _ => {
+                    let uqn = UnqualifiedName::from_expr(value)?;
+                    Tail::Full(uqn)
+                }
+            },
+            _ => return None,
+        };
+
+        let tail_segments: &[&str] = match &tail {
+            Tail::Empty => &[],
+            Tail::One(s) => s,
+            Tail::Two(s) => s,
+            Tail::Full(uqn) => {
+                let (_, t) = uqn.segments().split_first()?;
+                t
+            }
+        };
+
+        let is_simple_name = matches!(tail, Tail::Empty);
 
         match &binding.kind {
             BindingKind::Import(Import { qualified_name }) => {
                 if is_simple_name {
                     Some(qualified_name.as_ref().clone())
                 } else {
-                    let unqualified_name = UnqualifiedName::from_expr(value)?;
-                    let (_, tail) = unqualified_name.segments().split_first()?;
                     Some(QualifiedName::from_two_parts(
                         qualified_name.segments(),
-                        tail,
+                        tail_segments,
                     ))
                 }
             }
             BindingKind::SubmoduleImport(SubmoduleImport { qualified_name }) => {
                 let head_segment = &qualified_name.segments()[..1];
-                if is_simple_name {
-                    Some(QualifiedName::from_two_parts(head_segment, &[]))
-                } else {
-                    let value_name = UnqualifiedName::from_expr(value)?;
-                    let (_, tail) = value_name.segments().split_first()?;
-                    Some(QualifiedName::from_two_parts(head_segment, tail))
-                }
+                Some(QualifiedName::from_two_parts(head_segment, tail_segments))
             }
             BindingKind::FromImport(FromImport { qualified_name }) => {
                 if is_simple_name {
@@ -1061,17 +1085,18 @@ impl<'a> SemanticModel<'a> {
                         Some(qualified_name.as_ref().clone())
                     }
                 } else {
-                    let value_name = UnqualifiedName::from_expr(value)?;
-                    let (_, tail) = value_name.segments().split_first()?;
                     let resolved: QualifiedName =
                         if qualified_name.segments().first().copied() == Some(".") {
                             from_relative_import(
                                 self.module.qualified_name()?,
                                 qualified_name.segments(),
-                                tail,
+                                tail_segments,
                             )?
                         } else {
-                            QualifiedName::from_two_parts(qualified_name.segments(), tail)
+                            QualifiedName::from_two_parts(
+                                qualified_name.segments(),
+                                tail_segments,
+                            )
                         };
                     Some(resolved)
                 }
@@ -1082,39 +1107,41 @@ impl<'a> SemanticModel<'a> {
                     Some(QualifiedName::builtin(head.id.as_str()))
                 } else {
                     // Ex) `dict.__dict__`
-                    let value_name = UnqualifiedName::from_expr(value)?;
+                    // For builtins, we need ["", head, tail...].
                     Some(QualifiedName::from_two_parts(
-                        &[""],
-                        value_name.segments(),
+                        &["", head.id.as_str()],
+                        tail_segments,
                     ))
                 }
             }
             BindingKind::ClassDefinition(_) | BindingKind::FunctionDefinition(_) => {
-                if is_simple_name {
-                    if let Some(path) = self.module.qualified_name() {
-                        let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
+                if let Some(path) = self.module.qualified_name() {
+                    let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
+                    if is_simple_name {
                         Some(QualifiedName::from_two_parts(
                             &path_strs,
                             &[head.id.as_str()],
                         ))
                     } else {
+                        // Need [path..., head, tail...].
+                        // Build path_strs with head appended, then concat with tail.
+                        let mut head_segments = path_strs;
+                        head_segments.push(head.id.as_str());
                         Some(QualifiedName::from_two_parts(
-                            &[self.module.name()?],
-                            &[head.id.as_str()],
+                            &head_segments,
+                            tail_segments,
                         ))
                     }
                 } else {
-                    let value_name = UnqualifiedName::from_expr(value)?;
-                    if let Some(path) = self.module.qualified_name() {
-                        let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
+                    if is_simple_name {
                         Some(QualifiedName::from_two_parts(
-                            &path_strs,
-                            value_name.segments(),
+                            &[self.module.name()?],
+                            &[head.id.as_str()],
                         ))
                     } else {
                         Some(QualifiedName::from_two_parts(
-                            &[self.module.name()?],
-                            value_name.segments(),
+                            &[self.module.name()?, head.id.as_str()],
+                            tail_segments,
                         ))
                     }
                 }

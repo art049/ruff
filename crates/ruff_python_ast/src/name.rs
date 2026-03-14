@@ -244,10 +244,22 @@ impl<'a> QualifiedName<'a> {
     #[inline]
     pub fn from_two_parts(head: &[&'a str], tail: &[&'a str]) -> Self {
         let total = head.len() + tail.len();
-        let mut segments = SegmentsVec::with_capacity(total);
-        segments.extend_from_slice(head);
-        segments.extend_from_slice(tail);
-        Self(segments)
+        if total <= SMALL_LEN {
+            // Directly construct the inline storage, bypassing the SegmentsVec
+            // API overhead (match on variant, capacity checks, spill handling).
+            let mut segments: [&str; SMALL_LEN] = Default::default();
+            segments[..head.len()].copy_from_slice(head);
+            segments[head.len()..total].copy_from_slice(tail);
+            Self(SegmentsVec::Stack(SegmentsStack {
+                segments,
+                len: total,
+            }))
+        } else {
+            let mut vec = Vec::with_capacity(total);
+            vec.extend_from_slice(head);
+            vec.extend_from_slice(tail);
+            Self(SegmentsVec::Heap(vec))
+        }
     }
 
     /// Creates a qualified name for a built in
