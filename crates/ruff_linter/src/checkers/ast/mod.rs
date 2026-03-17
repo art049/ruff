@@ -272,7 +272,14 @@ impl<'a> Checker<'a> {
         target_version: TargetVersion,
         context: &'a LintContext<'a>,
     ) -> Self {
-        let semantic = SemanticModel::new(&settings.typing_modules, path, module);
+        // Estimate node count from token count. Each AST node typically corresponds
+        // to ~2 tokens, so we use token_count / 2 as a rough initial capacity to
+        // reduce Vec reallocations during AST traversal.
+        let estimated_nodes = parsed.tokens().len() / 2;
+        let semantic = SemanticModel::new(&settings.typing_modules, path, module, estimated_nodes);
+        // Functions/classes are roughly 1/16 of nodes; scopes match functions+classes+comprehensions.
+        let estimated_functions = estimated_nodes / 16;
+        let estimated_scopes = estimated_nodes / 8;
         Self {
             parsed,
             parsed_type_annotation: None,
@@ -289,8 +296,8 @@ impl<'a> Checker<'a> {
             indexer,
             importer: Importer::new(parsed, locator.contents(), stylist),
             semantic,
-            visit: deferred::Visit::default(),
-            analyze: deferred::Analyze::default(),
+            visit: deferred::Visit::with_capacity(estimated_functions),
+            analyze: deferred::Analyze::with_capacity(estimated_scopes),
             flake8_bugbear_seen: RefCell::default(),
             cell_offsets,
             notebook_index,

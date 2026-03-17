@@ -35,6 +35,7 @@ pub(crate) fn check_physical_lines(
     let enforce_trailing_whitespace = context.is_rule_enabled(Rule::TrailingWhitespace);
     let enforce_blank_line_contains_whitespace =
         context.is_rule_enabled(Rule::BlankLineWithWhitespace);
+    let enforce_indented_form_feed = context.is_rule_enabled(Rule::IndentedFormFeed);
     let enforce_copyright_notice = context.is_rule_enabled(Rule::MissingCopyrightNotice);
 
     let mut doc_lines_iter = doc_lines.iter().peekable();
@@ -66,7 +67,7 @@ pub(crate) fn check_physical_lines(
             trailing_whitespace(&line, locator, indexer, context);
         }
 
-        if context.is_rule_enabled(Rule::IndentedFormFeed) {
+        if enforce_indented_form_feed {
             indented_form_feed(&line, context);
         }
     }

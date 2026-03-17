@@ -62,6 +62,10 @@ impl Violation for BidirectionalUnicode {
 
 /// PLE2502
 pub(crate) fn bidirectional_unicode(line: &Line, context: &LintContext) {
+    // All bidirectional characters are non-ASCII, so skip the check for ASCII-only lines.
+    if line.is_ascii() {
+        return;
+    }
     if line.contains(BIDI_UNICODE) {
         context.report_diagnostic(BidirectionalUnicode, line.full_range());
     }

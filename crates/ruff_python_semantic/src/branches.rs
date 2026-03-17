@@ -25,6 +25,11 @@ pub struct BranchId;
 pub(crate) struct Branches(IndexVec<BranchId, Option<BranchId>>);
 
 impl Branches {
+    /// Creates a new `Branches` with the given capacity.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self(IndexVec::with_capacity(capacity))
+    }
+
     /// Inserts a new branch into the vector and returns its unique [`BranchID`].
     pub(crate) fn insert(&mut self, parent: Option<BranchId>) -> BranchId {
         self.0.push(parent)

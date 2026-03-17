@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use bitflags::bitflags;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use smallvec::SmallVec;
 
 use ruff_python_ast::helpers::{from_relative_import, map_subscript};
 use ruff_python_ast::name::{QualifiedName, UnqualifiedName};
@@ -147,29 +148,52 @@ pub struct SemanticModel<'a> {
 }
 
 impl<'a> SemanticModel<'a> {
-    pub fn new(typing_modules: &'a [String], path: &Path, module: Module<'a>) -> Self {
+    pub fn new(
+        typing_modules: &'a [String],
+        path: &Path,
+        module: Module<'a>,
+        estimated_node_count: usize,
+    ) -> Self {
+        // Heuristic capacity estimates based on token count.
+        // Bindings are roughly 1/4 of nodes (variable assignments, imports, etc.)
+        let estimated_bindings = estimated_node_count / 4;
+        // References are roughly equal to bindings (each name use resolves to a binding)
+        let estimated_references = estimated_bindings;
+        // Branches are relatively few compared to nodes
+        let estimated_branches = estimated_node_count / 16;
+        // Scopes: one per function/class/comprehension, roughly 1/8 of nodes
+        let estimated_scopes = estimated_node_count / 8;
+        // Definitions: one per function/class/method, roughly 1/8 of nodes
+        let estimated_definitions = estimated_node_count / 8;
+
         Self {
             typing_modules,
             module,
-            nodes: Nodes::default(),
+            nodes: Nodes::with_capacity(estimated_node_count),
             node_id: None,
-            branches: Branches::default(),
+            branches: Branches::with_capacity(estimated_branches),
             branch_id: None,
-            scopes: Scopes::default(),
+            scopes: Scopes::with_capacity(estimated_scopes),
             scope_id: ScopeId::global(),
-            definitions: Definitions::for_module(module),
+            definitions: Definitions::for_module_with_capacity(module, estimated_definitions),
             definition_id: DefinitionId::module(),
-            bindings: Bindings::default(),
-            resolved_references: ResolvedReferences::default(),
+            bindings: Bindings::with_capacity(estimated_bindings),
+            resolved_references: ResolvedReferences::with_capacity(estimated_references),
             unresolved_references: UnresolvedReferences::default(),
             globals: GlobalsArena::default(),
-            shadowed_bindings: FxHashMap::default(),
+            shadowed_bindings: FxHashMap::with_capacity_and_hasher(
+                estimated_bindings / 4,
+                FxBuildHasher,
+            ),
             delayed_annotations: FxHashMap::default(),
             rebinding_scopes: FxHashMap::default(),
             flags: SemanticModelFlags::new(path),
             seen: Modules::empty(),
             handled_exceptions: Vec::default(),
-            resolved_names: FxHashMap::default(),
+            resolved_names: FxHashMap::with_capacity_and_hasher(
+                estimated_references,
+                FxBuildHasher,
+            ),
         }
     }
 
@@ -1014,6 +1038,16 @@ impl<'a> SemanticModel<'a> {
             }
         }
 
+        // The tail segments (everything after the head Name) extracted from the
+        // expression. For simple names, the tail is empty. For single/double
+        // attribute access, we extract directly, avoiding UnqualifiedName::from_expr.
+        enum Tail<'a> {
+            Empty,
+            One([&'a str; 1]),
+            Two([&'a str; 2]),
+            Full(UnqualifiedName<'a>),
+        }
+
         // If the name was already resolved, look it up; otherwise, search for the symbol.
         let head = match_head(value)?;
         let binding = self
@@ -1021,93 +1055,116 @@ impl<'a> SemanticModel<'a> {
             .or_else(|| self.lookup_symbol(&head.id))
             .map(|id| self.binding(id))?;
 
+        let tail = match value {
+            Expr::Name(_) => Tail::Empty,
+            Expr::Attribute(attr) => match attr.value.as_ref() {
+                Expr::Name(_) => Tail::One([attr.attr.as_str()]),
+                Expr::Attribute(attr2) if attr2.value.is_name_expr() => {
+                    Tail::Two([attr2.attr.as_str(), attr.attr.as_str()])
+                }
+                _ => {
+                    let uqn = UnqualifiedName::from_expr(value)?;
+                    Tail::Full(uqn)
+                }
+            },
+            _ => return None,
+        };
+
+        let tail_segments: &[&str] = match &tail {
+            Tail::Empty => &[],
+            Tail::One(s) => s,
+            Tail::Two(s) => s,
+            Tail::Full(uqn) => {
+                let (_, t) = uqn.segments().split_first()?;
+                t
+            }
+        };
+
+        let is_simple_name = matches!(tail, Tail::Empty);
+
         match &binding.kind {
             BindingKind::Import(Import { qualified_name }) => {
-                let unqualified_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = unqualified_name.segments().split_first()?;
-                let resolved: QualifiedName = qualified_name
-                    .segments()
-                    .iter()
-                    .chain(tail)
-                    .copied()
-                    .collect();
-                Some(resolved)
+                if is_simple_name {
+                    Some(qualified_name.as_ref().clone())
+                } else {
+                    Some(QualifiedName::from_two_parts(
+                        qualified_name.segments(),
+                        tail_segments,
+                    ))
+                }
             }
             BindingKind::SubmoduleImport(SubmoduleImport { qualified_name }) => {
-                let value_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = value_name.segments().split_first()?;
-
-                Some(
-                    qualified_name
-                        .segments()
-                        .iter()
-                        .take(1)
-                        .chain(tail)
-                        .copied()
-                        .collect(),
-                )
+                let head_segment = &qualified_name.segments()[..1];
+                Some(QualifiedName::from_two_parts(head_segment, tail_segments))
             }
             BindingKind::FromImport(FromImport { qualified_name }) => {
-                let value_name = UnqualifiedName::from_expr(value)?;
-                let (_, tail) = value_name.segments().split_first()?;
-
-                let resolved: QualifiedName =
+                if is_simple_name {
                     if qualified_name.segments().first().copied() == Some(".") {
                         from_relative_import(
                             self.module.qualified_name()?,
                             qualified_name.segments(),
-                            tail,
-                        )?
+                            &[],
+                        )
                     } else {
-                        qualified_name
-                            .segments()
-                            .iter()
-                            .chain(tail)
-                            .copied()
-                            .collect()
-                    };
-                Some(resolved)
+                        Some(qualified_name.as_ref().clone())
+                    }
+                } else {
+                    let resolved: QualifiedName =
+                        if qualified_name.segments().first().copied() == Some(".") {
+                            from_relative_import(
+                                self.module.qualified_name()?,
+                                qualified_name.segments(),
+                                tail_segments,
+                            )?
+                        } else {
+                            QualifiedName::from_two_parts(qualified_name.segments(), tail_segments)
+                        };
+                    Some(resolved)
+                }
             }
             BindingKind::Builtin => {
-                if value.is_name_expr() {
+                if is_simple_name {
                     // Ex) `dict`
                     Some(QualifiedName::builtin(head.id.as_str()))
                 } else {
                     // Ex) `dict.__dict__`
-                    let value_name = UnqualifiedName::from_expr(value)?;
-                    Some(
-                        std::iter::once("")
-                            .chain(value_name.segments().iter().copied())
-                            .collect(),
-                    )
+                    // For builtins, we need ["", head, tail...].
+                    Some(QualifiedName::from_two_parts(
+                        &["", head.id.as_str()],
+                        tail_segments,
+                    ))
                 }
             }
             BindingKind::ClassDefinition(_) | BindingKind::FunctionDefinition(_) => {
-                // If we have a fully-qualified path for the module, use it.
                 if let Some(path) = self.module.qualified_name() {
-                    Some(
-                        path.iter()
-                            .map(String::as_str)
-                            .chain(
-                                UnqualifiedName::from_expr(value)?
-                                    .segments()
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                    )
+                    if is_simple_name {
+                        Some(QualifiedName::from_owned_and_str_parts(
+                            path,
+                            &[head.id.as_str()],
+                        ))
+                    } else {
+                        // Need [path..., head, tail...].
+                        // Build a combined tail with head prepended.
+                        let mut combined_tail = Vec::with_capacity(1 + tail_segments.len());
+                        combined_tail.push(head.id.as_str());
+                        combined_tail.extend_from_slice(tail_segments);
+                        Some(QualifiedName::from_owned_and_str_parts(
+                            path,
+                            &combined_tail,
+                        ))
+                    }
                 } else {
-                    // Otherwise, if we're in (e.g.) a script, use the module name.
-                    Some(
-                        std::iter::once(self.module.name()?)
-                            .chain(
-                                UnqualifiedName::from_expr(value)?
-                                    .segments()
-                                    .iter()
-                                    .copied(),
-                            )
-                            .collect(),
-                    )
+                    if is_simple_name {
+                        Some(QualifiedName::from_two_parts(
+                            &[self.module.name()?],
+                            &[head.id.as_str()],
+                        ))
+                    } else {
+                        Some(QualifiedName::from_two_parts(
+                            &[self.module.name()?, head.id.as_str()],
+                            tail_segments,
+                        ))
+                    }
                 }
             }
             _ => None,
@@ -1713,20 +1770,20 @@ impl<'a> SemanticModel<'a> {
     /// This implementation assumes that the statements are in the same scope.
     pub fn same_branch(&self, left: NodeId, right: NodeId) -> bool {
         // Collect the branch path for the left statement.
-        let left = self
+        let left: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(left)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Collect the branch path for the right statement.
-        let right = self
+        let right: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(right)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         left == right
     }
@@ -1753,20 +1810,20 @@ impl<'a> SemanticModel<'a> {
     /// This implementation assumes that the statements are in the same scope.
     pub fn dominates(&self, dominator: NodeId, node: NodeId) -> bool {
         // Collect the branch path for the left statement.
-        let dominator = self
+        let dominator: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(dominator)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Collect the branch path for the right statement.
-        let node = self
+        let node: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(node)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Note that the paths are in "reverse" order -
         // from most nested to least nested.

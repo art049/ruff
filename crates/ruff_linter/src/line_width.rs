@@ -222,7 +222,37 @@ impl LineWidthBuilder {
 
     /// Adds the given text to the line width.
     #[must_use]
-    pub fn add_str(self, text: &str) -> Self {
+    pub fn add_str(mut self, text: &str) -> Self {
+        // Fast path: ASCII text without tabs or newlines has width == byte length.
+        // `is_ascii()` is SIMD-accelerated, avoiding per-char `unicode_width` lookups.
+        if text.is_ascii() {
+            // Super-fast path: ASCII text with no special characters.
+            // Width and column just increase by the byte length.
+            if memchr::memchr3(b'\t', b'\n', b'\r', text.as_bytes()).is_none() {
+                self.width += text.len();
+                self.column += text.len();
+                return self;
+            }
+            let tab_size: usize = self.tab_size.as_usize();
+            for &b in text.as_bytes() {
+                match b {
+                    b'\t' => {
+                        let tab_offset = tab_size - (self.column % tab_size);
+                        self.width += tab_offset;
+                        self.column += tab_offset;
+                    }
+                    b'\n' | b'\r' => {
+                        self.width = 0;
+                        self.column = 0;
+                    }
+                    _ => {
+                        self.width += 1;
+                        self.column += 1;
+                    }
+                }
+            }
+            return self;
+        }
         self.update(text.chars())
     }
 

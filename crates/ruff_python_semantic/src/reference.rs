@@ -116,6 +116,11 @@ pub struct ResolvedReferenceId;
 pub(crate) struct ResolvedReferences(IndexVec<ResolvedReferenceId, ResolvedReference>);
 
 impl ResolvedReferences {
+    /// Creates a new `ResolvedReferences` with the given capacity.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self(IndexVec::with_capacity(capacity))
+    }
+
     /// Pushes a new [`ResolvedReference`] and returns its [`ResolvedReferenceId`].
     pub(crate) fn push(
         &mut self,

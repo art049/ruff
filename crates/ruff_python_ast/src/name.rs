@@ -237,6 +237,56 @@ impl<'a> QualifiedName<'a> {
         name.split('.').collect()
     }
 
+    /// Construct a [`QualifiedName`] by concatenating two segment slices.
+    ///
+    /// This is more efficient than chaining iterators and collecting, as it
+    /// avoids the per-element dispatch overhead of iterator adapters.
+    #[inline]
+    pub fn from_two_parts(head: &[&'a str], tail: &[&'a str]) -> Self {
+        let total = head.len() + tail.len();
+        if total <= SMALL_LEN {
+            // Directly construct the inline storage, bypassing the SegmentsVec
+            // API overhead (match on variant, capacity checks, spill handling).
+            let mut segments: [&str; SMALL_LEN] = Default::default();
+            segments[..head.len()].copy_from_slice(head);
+            segments[head.len()..total].copy_from_slice(tail);
+            Self(SegmentsVec::Stack(SegmentsStack {
+                segments,
+                len: total,
+            }))
+        } else {
+            let mut vec = Vec::with_capacity(total);
+            vec.extend_from_slice(head);
+            vec.extend_from_slice(tail);
+            Self(SegmentsVec::Heap(vec))
+        }
+    }
+
+    /// Construct a [`QualifiedName`] from owned `String` segments and `&str` tail segments.
+    ///
+    /// Like [`from_two_parts`](Self::from_two_parts), but accepts `&[String]` for the head,
+    /// avoiding the need to collect into a `Vec<&str>` first.
+    #[inline]
+    pub fn from_owned_and_str_parts(head: &'a [String], tail: &[&'a str]) -> Self {
+        let total = head.len() + tail.len();
+        if total <= SMALL_LEN {
+            let mut segments: [&str; SMALL_LEN] = Default::default();
+            for (i, s) in head.iter().enumerate() {
+                segments[i] = s.as_str();
+            }
+            segments[head.len()..total].copy_from_slice(tail);
+            Self(SegmentsVec::Stack(SegmentsStack {
+                segments,
+                len: total,
+            }))
+        } else {
+            let mut vec = Vec::with_capacity(total);
+            vec.extend(head.iter().map(String::as_str));
+            vec.extend_from_slice(tail);
+            Self(SegmentsVec::Heap(vec))
+        }
+    }
+
     /// Creates a qualified name for a built in
     #[inline]
     pub fn builtin(name: &'a str) -> Self {

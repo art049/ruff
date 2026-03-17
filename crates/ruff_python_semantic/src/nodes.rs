@@ -33,6 +33,13 @@ pub struct Nodes<'a> {
 }
 
 impl<'a> Nodes<'a> {
+    /// Creates a new `Nodes` with the given capacity.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            nodes: IndexVec::with_capacity(capacity),
+        }
+    }
+
     /// Inserts a new AST node into the tree and returns its unique ID.
     pub(crate) fn insert(
         &mut self,
