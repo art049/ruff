@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use bitflags::bitflags;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
+use smallvec::SmallVec;
 
 use ruff_python_ast::helpers::{from_relative_import, map_subscript};
 use ruff_python_ast::name::{QualifiedName, UnqualifiedName};
@@ -147,29 +148,52 @@ pub struct SemanticModel<'a> {
 }
 
 impl<'a> SemanticModel<'a> {
-    pub fn new(typing_modules: &'a [String], path: &Path, module: Module<'a>) -> Self {
+    pub fn new(
+        typing_modules: &'a [String],
+        path: &Path,
+        module: Module<'a>,
+        estimated_node_count: usize,
+    ) -> Self {
+        // Heuristic capacity estimates based on token count.
+        // Bindings are roughly 1/4 of nodes (variable assignments, imports, etc.)
+        let estimated_bindings = estimated_node_count / 4;
+        // References are roughly equal to bindings (each name use resolves to a binding)
+        let estimated_references = estimated_bindings;
+        // Branches are relatively few compared to nodes
+        let estimated_branches = estimated_node_count / 16;
+        // Scopes: one per function/class/comprehension, roughly 1/8 of nodes
+        let estimated_scopes = estimated_node_count / 8;
+        // Definitions: one per function/class/method, roughly 1/8 of nodes
+        let estimated_definitions = estimated_node_count / 8;
+
         Self {
             typing_modules,
             module,
-            nodes: Nodes::default(),
+            nodes: Nodes::with_capacity(estimated_node_count),
             node_id: None,
-            branches: Branches::default(),
+            branches: Branches::with_capacity(estimated_branches),
             branch_id: None,
-            scopes: Scopes::default(),
+            scopes: Scopes::with_capacity(estimated_scopes),
             scope_id: ScopeId::global(),
-            definitions: Definitions::for_module(module),
+            definitions: Definitions::for_module_with_capacity(module, estimated_definitions),
             definition_id: DefinitionId::module(),
-            bindings: Bindings::default(),
-            resolved_references: ResolvedReferences::default(),
+            bindings: Bindings::with_capacity(estimated_bindings),
+            resolved_references: ResolvedReferences::with_capacity(estimated_references),
             unresolved_references: UnresolvedReferences::default(),
             globals: GlobalsArena::default(),
-            shadowed_bindings: FxHashMap::default(),
+            shadowed_bindings: FxHashMap::with_capacity_and_hasher(
+                estimated_bindings / 4,
+                FxBuildHasher,
+            ),
             delayed_annotations: FxHashMap::default(),
             rebinding_scopes: FxHashMap::default(),
             flags: SemanticModelFlags::new(path),
             seen: Modules::empty(),
             handled_exceptions: Vec::default(),
-            resolved_names: FxHashMap::default(),
+            resolved_names: FxHashMap::with_capacity_and_hasher(
+                estimated_references,
+                FxBuildHasher,
+            ),
         }
     }
 
@@ -1113,18 +1137,21 @@ impl<'a> SemanticModel<'a> {
             }
             BindingKind::ClassDefinition(_) | BindingKind::FunctionDefinition(_) => {
                 if let Some(path) = self.module.qualified_name() {
-                    let path_strs: Vec<&str> = path.iter().map(String::as_str).collect();
                     if is_simple_name {
-                        Some(QualifiedName::from_two_parts(
-                            &path_strs,
+                        Some(QualifiedName::from_owned_and_str_parts(
+                            path,
                             &[head.id.as_str()],
                         ))
                     } else {
                         // Need [path..., head, tail...].
-                        // Build path_strs with head appended, then concat with tail.
-                        let mut head_segments = path_strs;
-                        head_segments.push(head.id.as_str());
-                        Some(QualifiedName::from_two_parts(&head_segments, tail_segments))
+                        // Build a combined tail with head prepended.
+                        let mut combined_tail = Vec::with_capacity(1 + tail_segments.len());
+                        combined_tail.push(head.id.as_str());
+                        combined_tail.extend_from_slice(tail_segments);
+                        Some(QualifiedName::from_owned_and_str_parts(
+                            path,
+                            &combined_tail,
+                        ))
                     }
                 } else {
                     if is_simple_name {
@@ -1743,20 +1770,20 @@ impl<'a> SemanticModel<'a> {
     /// This implementation assumes that the statements are in the same scope.
     pub fn same_branch(&self, left: NodeId, right: NodeId) -> bool {
         // Collect the branch path for the left statement.
-        let left = self
+        let left: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(left)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Collect the branch path for the right statement.
-        let right = self
+        let right: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(right)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         left == right
     }
@@ -1783,20 +1810,20 @@ impl<'a> SemanticModel<'a> {
     /// This implementation assumes that the statements are in the same scope.
     pub fn dominates(&self, dominator: NodeId, node: NodeId) -> bool {
         // Collect the branch path for the left statement.
-        let dominator = self
+        let dominator: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(dominator)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Collect the branch path for the right statement.
-        let node = self
+        let node: SmallVec<[_; 8]> = self
             .nodes
             .branch_id(node)
             .iter()
             .flat_map(|branch_id| self.branches.ancestor_ids(*branch_id))
-            .collect::<Vec<_>>();
+            .collect();
 
         // Note that the paths are in "reverse" order -
         // from most nested to least nested.

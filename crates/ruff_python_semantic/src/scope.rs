@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use bitflags::bitflags;
 use ruff_python_ast as ast;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxBuildHasher, FxHashMap};
 
 use ruff_index::{Idx, IndexSlice, IndexVec, newtype_index};
 
@@ -46,11 +46,14 @@ pub struct Scope<'a> {
 
 impl<'a> Scope<'a> {
     pub fn global() -> Self {
+        // Pre-allocate for ~160 Python builtins + magic globals that are
+        // always added to the global scope, plus room for top-level imports
+        // and definitions.
         Scope {
             kind: ScopeKind::Module,
             parent: None,
             star_imports: Vec::default(),
-            bindings: FxHashMap::default(),
+            bindings: FxHashMap::with_capacity_and_hasher(256, FxBuildHasher),
             shadowed_bindings: FxHashMap::default(),
             globals_id: None,
             flags: ScopeFlags::empty(),
@@ -254,6 +257,13 @@ impl ScopeId {
 pub struct Scopes<'a>(IndexVec<ScopeId, Scope<'a>>);
 
 impl<'a> Scopes<'a> {
+    /// Creates a new `Scopes` with the given capacity, initialized with the global scope.
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        let mut vec = IndexVec::with_capacity(capacity);
+        vec.push(Scope::global());
+        Self(vec)
+    }
+
     /// Returns a reference to the global scope
     pub(crate) fn global(&self) -> &Scope<'a> {
         &self[ScopeId::global()]

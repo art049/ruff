@@ -16,6 +16,14 @@ pub(crate) struct Visit<'a> {
 }
 
 impl Visit<'_> {
+    /// Creates a new `Visit` with estimated capacities for common collections.
+    pub(crate) fn with_capacity(estimated_functions: usize) -> Self {
+        Self {
+            functions: Vec::with_capacity(estimated_functions),
+            ..Default::default()
+        }
+    }
+
     /// Returns `true` if there are no deferred nodes.
     pub(crate) fn is_empty(&self) -> bool {
         self.string_type_definitions.is_empty()
@@ -36,4 +44,14 @@ pub(crate) struct Analyze {
     pub(crate) for_loops: Vec<Snapshot>,
     pub(crate) with_statements: Vec<Snapshot>,
     pub(crate) comprehensions: Vec<Snapshot>,
+}
+
+impl Analyze {
+    /// Creates a new `Analyze` with estimated capacities.
+    pub(crate) fn with_capacity(estimated_scopes: usize) -> Self {
+        Self {
+            scopes: Vec::with_capacity(estimated_scopes),
+            ..Default::default()
+        }
+    }
 }

@@ -262,6 +262,31 @@ impl<'a> QualifiedName<'a> {
         }
     }
 
+    /// Construct a [`QualifiedName`] from owned `String` segments and `&str` tail segments.
+    ///
+    /// Like [`from_two_parts`](Self::from_two_parts), but accepts `&[String]` for the head,
+    /// avoiding the need to collect into a `Vec<&str>` first.
+    #[inline]
+    pub fn from_owned_and_str_parts(head: &'a [String], tail: &[&'a str]) -> Self {
+        let total = head.len() + tail.len();
+        if total <= SMALL_LEN {
+            let mut segments: [&str; SMALL_LEN] = Default::default();
+            for (i, s) in head.iter().enumerate() {
+                segments[i] = s.as_str();
+            }
+            segments[head.len()..total].copy_from_slice(tail);
+            Self(SegmentsVec::Stack(SegmentsStack {
+                segments,
+                len: total,
+            }))
+        } else {
+            let mut vec = Vec::with_capacity(total);
+            vec.extend(head.iter().map(String::as_str));
+            vec.extend_from_slice(tail);
+            Self(SegmentsVec::Heap(vec))
+        }
+    }
+
     /// Creates a qualified name for a built in
     #[inline]
     pub fn builtin(name: &'a str) -> Self {

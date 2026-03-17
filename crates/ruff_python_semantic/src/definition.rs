@@ -205,6 +205,13 @@ impl<'a> Definitions<'a> {
         Self(IndexVec::from_raw(vec![Definition::Module(definition)]))
     }
 
+    /// Creates a new `Definitions` for a module with the given capacity.
+    pub fn for_module_with_capacity(definition: Module<'a>, capacity: usize) -> Self {
+        let mut vec = IndexVec::with_capacity(capacity);
+        vec.push(Definition::Module(definition));
+        Self(vec)
+    }
+
     /// Pushes a new member definition and returns its unique id.
     ///
     /// Members are assumed to be pushed in traversal order, such that parents are pushed before

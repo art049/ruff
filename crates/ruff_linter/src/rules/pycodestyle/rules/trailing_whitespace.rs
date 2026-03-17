@@ -1,7 +1,7 @@
 use ruff_macros::{ViolationMetadata, derive_message_formats};
 use ruff_python_index::Indexer;
 use ruff_source_file::Line;
-use ruff_text_size::{TextLen, TextRange, TextSize};
+use ruff_text_size::{TextRange, TextSize};
 
 use crate::Locator;
 use crate::checkers::ast::LintContext;
@@ -91,13 +91,20 @@ pub(crate) fn trailing_whitespace(
     indexer: &Indexer,
     context: &LintContext,
 ) {
-    let whitespace_len: TextSize = line
-        .chars()
-        .rev()
-        .take_while(|c| c.is_whitespace())
-        .map(TextLen::text_len)
-        .sum();
-    if whitespace_len > TextSize::from(0) {
+    // Scan bytes from the end for trailing ASCII whitespace.
+    // In Python source files, trailing whitespace is virtually always ASCII
+    // (spaces, tabs, form feeds). This avoids char-by-char reverse iteration.
+    let bytes = line.as_bytes();
+    let mut trailing = 0usize;
+    for &b in bytes.iter().rev() {
+        if b == b' ' || b == b'\t' || b == b'\x0c' {
+            trailing += 1;
+        } else {
+            break;
+        }
+    }
+    let whitespace_len = TextSize::try_from(trailing).unwrap();
+    if trailing > 0 {
         let range = TextRange::new(line.end() - whitespace_len, line.end());
         // Removing trailing whitespace is not safe inside multiline strings.
         let applicability = if indexer.multiline_ranges().contains_range(range) {
